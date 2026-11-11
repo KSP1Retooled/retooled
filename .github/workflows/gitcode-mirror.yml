@@ -1,4 +1,4 @@
-name: Mirror release to Gitee
+name: Mirror release to GitCode
 
 on:
   release:
@@ -14,22 +14,22 @@ on:
     branches: [gitee-mirror]
 
 concurrency:
-  group: gitee-mirror-${{ github.event.release.tag_name || inputs.tag || 'latest' }}
+  group: gitcode-mirror-${{ github.event.release.tag_name || inputs.tag || 'latest' }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 env:
-  GITEE_OWNER: ksp1retooled
-  GITEE_REPO: retooled
+  GITCODE_OWNER: ksp1retooled
+  GITCODE_REPO: retooled
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    # Gitee accepts ~25 KB/s per upload from outside China; assets upload in
-    # parallel, so a release takes about as long as its largest asset (~3.5 h
-    # for ~300 MB). GitHub-hosted jobs are capped at 6 h.
+    # Assets upload in parallel straight to GitCode's object storage, so a
+    # release takes about as long as its largest asset. Keep the GitHub-hosted
+    # 6 h ceiling as headroom until real upload speeds are known.
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
@@ -51,9 +51,10 @@ jobs:
       - name: Mirror release and assets
         env:
           GH_TOKEN: ${{ github.token }}
-          GITEE_TOKEN: ${{ secrets.GITEEPAT }}
+          # The GITEEPAT secret now holds the GitCode personal access token.
+          GITCODE_TOKEN: ${{ secrets.GITEEPAT }}
           TAG: ${{ steps.tag.outputs.tag }}
           # Assets are often uploaded after the release is published, so on
           # release events wait for the asset list to settle before syncing.
           WAIT_FOR_ASSETS: ${{ github.event_name == 'release' && github.event.action == 'published' }}
-        run: .github/scripts/gitee-mirror.sh
+        run: .github/scripts/gitcode-mirror.sh
