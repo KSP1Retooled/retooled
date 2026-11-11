@@ -105,57 +105,85 @@ gitee_assets=$(curl -sSf -G "$API/releases/$release_id/attach_files" \
 
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
-failed=0
 
-while IFS=$'\t' read -r asset size; do
+# Sync one asset: skip if already present, else download from GitHub and
+# upload to Gitee, reporting progress once a minute. Runs in a subshell.
+sync_asset() {
+  local asset=$1 size=$2 match gid gsize
+  local dir="$workdir/$asset.d"
+  mkdir -p "$dir"
+
   match=$(jq -r --arg n "$asset" '.[] | select(.name == $n) | "\(.id)\t\(.size // "")"' \
     <<<"$gitee_assets" | head -n1)
   if [ -n "$match" ]; then
     gid=${match%%$'\t'*}
     gsize=${match#*$'\t'}
     if [ -z "$gsize" ] || [ "$gsize" = "$size" ]; then
-      echo "✓ $asset already on Gitee"
-      continue
+      echo "✓ already on Gitee"
+      return 0
     fi
-    echo "↻ $asset size changed ($gsize -> $size); replacing"
+    echo "↻ size changed ($gsize -> $size); replacing"
     curl -sSf -X DELETE -G "$API/releases/$release_id/attach_files/$gid" \
       --data-urlencode "access_token=$GITEE_TOKEN" >/dev/null
   fi
 
-  echo "↓ Downloading $asset ($size bytes)"
+  echo "↓ Downloading ($size bytes)"
   gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
-    --pattern "$asset" --dir "$workdir" --clobber
+    --pattern "$asset" --dir "$dir" --clobber
 
-  echo "↑ Uploading $asset to Gitee"
-  # Run curl in the background so progress can be reported once a minute.
+  echo "↑ Uploading to Gitee"
   # Abort if throughput stays under 10 KB/s for 5 minutes rather than hanging.
-  respfile="$workdir/resp" progfile="$workdir/progress"
+  # UPLOAD_MAX_TIME (seconds) caps each upload; used for throughput tests.
+  local extra=()
+  [ -n "${UPLOAD_MAX_TIME:-}" ] && extra=(--max-time "$UPLOAD_MAX_TIME")
   curl -S -X POST "$API/releases/$release_id/attach_files" \
     -F "access_token=$GITEE_TOKEN" \
-    -F "file=@$workdir/$asset" \
-    --speed-limit 10240 --speed-time 300 \
-    -o "$respfile" -w '%{http_code} %{time_total} %{speed_upload}' \
-    >"$workdir/stats" 2>"$progfile" &
-  pid=$!
-  next_report=$((SECONDS + 60))
+    -F "file=@$dir/$asset" \
+    --speed-limit 10240 --speed-time 300 "${extra[@]}" \
+    -o "$dir/resp" -w '%{http_code} %{time_total} %{speed_upload}' \
+    >"$dir/stats" 2>"$dir/progress" &
+  local pid=$! next_report=$((SECONDS + 60)) code secs bps
   while kill -0 "$pid" 2>/dev/null; do
     sleep 5
     if (( SECONDS >= next_report )); then
       next_report=$((next_report + 60))
       # curl's meter: %, total, %, recv, %, sent, avg dl, avg ul, ...
-      tr '\r' '\n' <"$progfile" | awk 'NF >= 12 && $1 ~ /^[0-9]/ {l=$0} END {
-        if (l) { split(l, f); printf "  … %s%% of %s sent, avg %s/s, elapsed %s, left %s\n", f[5], f[2], f[8], f[10], f[11] } }'
+      tr '\r' '\n' <"$dir/progress" | awk 'NF >= 12 && $1 ~ /^[0-9]/ {l=$0} END {
+        if (l) { split(l, f); printf "… %s%% of %s sent, avg %s/s, elapsed %s, left %s\n", f[5], f[2], f[8], f[10], f[11] } }'
     fi
   done
   wait "$pid" || true
-  read -r code secs bps <"$workdir/stats" || true
-  echo "  HTTP ${code:-000} in ${secs:-?}s ($(awk -v b="${bps:-0}" 'BEGIN{printf "%.1f", b/1024}') KB/s)"
+  read -r code secs bps <"$dir/stats" || true
+  echo "HTTP ${code:-000} in ${secs:-?}s ($(awk -v b="${bps:-0}" 'BEGIN{printf "%.1f", b/1024}') KB/s)"
+  rm -f "$dir/$asset"
   if [[ "${code:-000}" != 2* ]]; then
-    echo "::error::Upload of $asset failed (HTTP ${code:-000}): $(cat "$respfile" 2>/dev/null) $(tr '\r' '\n' <"$progfile" | grep -v '^ *[0-9% ]' | tail -n3)"
+    echo "::error::Upload of $asset failed (HTTP ${code:-000}): $(cat "$dir/resp" 2>/dev/null) $(tr '\r' '\n' <"$dir/progress" | grep -v '^ *[0-9% ]' | tail -n3)"
+    return 1
+  fi
+}
+
+# Uploads to Gitee from outside China crawl at ~20 KB/s per connection, so
+# sync every asset concurrently. Each line is prefixed with the asset name.
+assets=$(jq -r --arg f "${ASSET_FILTER:-}" \
+  '.assets[] | select($f == "" or (.name | test($f))) | "\(.name)\t\(.size)"' <<<"$release")
+while IFS=$'\t' read -r asset size; do
+  [ -n "$asset" ] || continue
+  (
+    set -o pipefail
+    rc=0
+    sync_asset "$asset" "$size" 2>&1 | sed -u "s/^/[$asset] /" || rc=$?
+    echo "$rc" >"$workdir/$asset.status"
+  ) &
+done <<<"$assets"
+wait
+
+failed=0
+while IFS=$'\t' read -r asset _; do
+  [ -n "$asset" ] || continue
+  if [ "$(cat "$workdir/$asset.status" 2>/dev/null)" != 0 ]; then
+    echo "::error::$asset was not mirrored"
     failed=1
   fi
-  rm -f "$workdir/$asset"
-done < <(jq -r --arg f "${ASSET_FILTER:-}" \
-  '.assets[] | select($f == "" or (.name | test($f))) | "\(.name)\t\(.size)"' <<<"$release")
+done <<<"$assets"
 
 exit "$failed"

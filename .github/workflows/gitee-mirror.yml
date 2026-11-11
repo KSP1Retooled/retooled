@@ -26,14 +26,7 @@ env:
 
 jobs:
   mirror:
-    # Self-hosted: GitHub-hosted runners only reach Gitee at ~20 KB/s.
-    runs-on: self-hosted
-    container:
-      image: ghcr.io/ksp1retooled/ksp-ci:1
-      options: --user 1003:1003
-    defaults:
-      run:
-        shell: bash
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -60,6 +53,8 @@ jobs:
           # Assets are often uploaded after the release is published, so on
           # release events wait for the asset list to settle before syncing.
           WAIT_FOR_ASSETS: ${{ github.event_name == 'release' && github.event.action == 'published' }}
-          # Prototype only: upload a single large asset to measure throughput.
-          ASSET_FILTER: ${{ github.event_name == 'push' && '^retooled-linux\.rtpatch$' || '' }}
+          # Prototype only: upload three large assets in parallel for 3 minutes
+          # to measure whether throughput scales with concurrent connections.
+          ASSET_FILTER: ${{ github.event_name == 'push' && '^retooled-(linux|macos|windows)\.rtpatch$' || '' }}
+          UPLOAD_MAX_TIME: ${{ github.event_name == 'push' && '180' || '' }}
         run: .github/scripts/gitee-mirror.sh
