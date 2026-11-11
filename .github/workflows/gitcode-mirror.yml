@@ -34,6 +34,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Uploads cross a long, lossy link to China. BBR keeps throughput up
+      # under packet loss where the default CUBIC collapses, and bigger send
+      # buffers let each connection keep more data in flight. Best effort:
+      # the mirror still runs if the runner refuses these settings.
+      - name: Tune TCP for long-distance uploads
+        continue-on-error: true
+        run: |
+          sudo modprobe tcp_bbr
+          sudo sysctl -w net.core.default_qdisc=fq \
+            net.ipv4.tcp_congestion_control=bbr \
+            net.core.wmem_max=67108864 \
+            net.ipv4.tcp_wmem="4096 65536 67108864" \
+            net.ipv4.tcp_slow_start_after_idle=0
+          sysctl net.ipv4.tcp_congestion_control
+
       - name: Resolve release tag
         id: tag
         env:
