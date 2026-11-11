@@ -1,0 +1,80 @@
+name: Mirror release to Gitee
+
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to mirror (defaults to the latest release)
+        required: false
+  # Prototype only: lets the workflow run from a non-default branch.
+  # Remove before merging to main.
+  push:
+    branches: [gitee-mirror]
+
+concurrency:
+  group: gitee-mirror-${{ github.event.release.tag_name || inputs.tag || 'latest' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GITEE_OWNER: ksp1retooled
+  GITEE_REPO: retooled
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${EVENT_TAG:-$INPUT_TAG}"
+          if [ -z "$tag" ]; then
+            tag=$(gh release list -R "$GITHUB_REPOSITORY" --limit 1 --json tagName -q '.[0].tagName')
+          fi
+          echo "Mirroring release $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH for Gitee
+        env:
+          GITEE_PK: ${{ secrets.GITEEPK }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$GITEE_PK" > ~/.ssh/gitee
+          chmod 600 ~/.ssh/gitee
+          ssh-keyscan -t ed25519,rsa gitee.com >> ~/.ssh/known_hosts
+          cat >> ~/.ssh/config <<'EOF'
+          Host gitee.com
+            IdentityFile ~/.ssh/gitee
+            IdentitiesOnly yes
+          EOF
+
+      - name: Push branch and tag to Gitee
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          git remote add gitee "git@gitee.com:${GITEE_OWNER}/${GITEE_REPO}.git"
+          git push gitee "refs/remotes/origin/main:refs/heads/main"
+          git push --force gitee "refs/tags/${TAG}:refs/tags/${TAG}"
+
+      - name: Mirror release and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITEE_TOKEN: ${{ secrets.GITEEPAT }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          # Assets are often uploaded after the release is published, so on
+          # release events wait for the asset list to settle before syncing.
+          WAIT_FOR_ASSETS: ${{ github.event_name == 'release' && github.event.action == 'published' }}
+        run: .github/scripts/gitee-mirror.sh
