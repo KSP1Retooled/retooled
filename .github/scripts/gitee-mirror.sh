@@ -127,17 +127,31 @@ while IFS=$'\t' read -r asset size; do
     --pattern "$asset" --dir "$workdir" --clobber
 
   echo "↑ Uploading $asset to Gitee"
+  # Run curl in the background so progress can be reported once a minute.
   # Abort if throughput stays under 10 KB/s for 5 minutes rather than hanging.
-  resp=$(curl -sS -X POST "$API/releases/$release_id/attach_files" \
+  respfile="$workdir/resp" progfile="$workdir/progress"
+  curl -S -X POST "$API/releases/$release_id/attach_files" \
     -F "access_token=$GITEE_TOKEN" \
     -F "file=@$workdir/$asset" \
     --speed-limit 10240 --speed-time 300 \
-    -w '\n%{http_code} %{time_total} %{speed_upload}') || true
-  stats=${resp##*$'\n'}
-  read -r code secs bps <<<"$stats"
-  echo "  HTTP $code in ${secs}s ($(awk -v b="$bps" 'BEGIN{printf "%.1f", b/1024}') KB/s)"
-  if [[ "$code" != 2* ]]; then
-    echo "::error::Upload of $asset failed (HTTP $code): ${resp%$'\n'*}"
+    -o "$respfile" -w '%{http_code} %{time_total} %{speed_upload}' \
+    >"$workdir/stats" 2>"$progfile" &
+  pid=$!
+  next_report=$((SECONDS + 60))
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 5
+    if (( SECONDS >= next_report )); then
+      next_report=$((next_report + 60))
+      # curl's meter: %, total, %, recv, %, sent, avg dl, avg ul, ...
+      tr '\r' '\n' <"$progfile" | awk 'NF >= 12 && $1 ~ /^[0-9]/ {l=$0} END {
+        if (l) { split(l, f); printf "  … %s%% of %s sent, avg %s/s, elapsed %s, left %s\n", f[5], f[2], f[8], f[10], f[11] } }'
+    fi
+  done
+  wait "$pid" || true
+  read -r code secs bps <"$workdir/stats" || true
+  echo "  HTTP ${code:-000} in ${secs:-?}s ($(awk -v b="${bps:-0}" 'BEGIN{printf "%.1f", b/1024}') KB/s)"
+  if [[ "${code:-000}" != 2* ]]; then
+    echo "::error::Upload of $asset failed (HTTP ${code:-000}): $(cat "$respfile" 2>/dev/null) $(tr '\r' '\n' <"$progfile" | grep -v '^ *[0-9% ]' | tail -n3)"
     failed=1
   fi
   rm -f "$workdir/$asset"
