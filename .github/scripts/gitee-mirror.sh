@@ -7,6 +7,7 @@
 # Required env: GH_TOKEN, GITEE_TOKEN, GITEE_OWNER, GITEE_REPO, TAG,
 #               GITHUB_REPOSITORY
 # Optional env: WAIT_FOR_ASSETS=true
+#               ASSET_FILTER=<regex>  only sync assets whose name matches
 set -euo pipefail
 
 API="https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}"
@@ -126,16 +127,21 @@ while IFS=$'\t' read -r asset size; do
     --pattern "$asset" --dir "$workdir" --clobber
 
   echo "↑ Uploading $asset to Gitee"
+  # Abort if throughput stays under 10 KB/s for 5 minutes rather than hanging.
   resp=$(curl -sS -X POST "$API/releases/$release_id/attach_files" \
     -F "access_token=$GITEE_TOKEN" \
     -F "file=@$workdir/$asset" \
-    -w '\n%{http_code}')
-  code=${resp##*$'\n'}
+    --speed-limit 10240 --speed-time 300 \
+    -w '\n%{http_code} %{time_total} %{speed_upload}') || true
+  stats=${resp##*$'\n'}
+  read -r code secs bps <<<"$stats"
+  echo "  HTTP $code in ${secs}s ($(awk -v b="$bps" 'BEGIN{printf "%.1f", b/1024}') KB/s)"
   if [[ "$code" != 2* ]]; then
     echo "::error::Upload of $asset failed (HTTP $code): ${resp%$'\n'*}"
     failed=1
   fi
   rm -f "$workdir/$asset"
-done < <(jq -r '.assets[] | "\(.name)\t\(.size)"' <<<"$release")
+done < <(jq -r --arg f "${ASSET_FILTER:-}" \
+  '.assets[] | select($f == "" or (.name | test($f))) | "\(.name)\t\(.size)"' <<<"$release")
 
 exit "$failed"

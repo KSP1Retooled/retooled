@@ -53,4 +53,6 @@ jobs:
           # Assets are often uploaded after the release is published, so on
           # release events wait for the asset list to settle before syncing.
           WAIT_FOR_ASSETS: ${{ github.event_name == 'release' && github.event.action == 'published' }}
+          # Prototype only: upload just the small refs zip to measure throughput.
+          ASSET_FILTER: ${{ github.event_name == 'push' && '^retooled-refs\.zip$' || '' }}
         run: .github/scripts/gitee-mirror.sh
