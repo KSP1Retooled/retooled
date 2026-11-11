@@ -26,10 +26,19 @@ env:
 
 jobs:
   mirror:
-    runs-on: ubuntu-latest
+    # Self-hosted: GitHub-hosted runners only reach Gitee at ~20 KB/s.
+    runs-on: self-hosted
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check runner environment
+        run: |
+          uname -a || true
+          for t in gh jq curl awk; do printf '%s: ' "$t"; command -v "$t" || echo MISSING; done
 
       - name: Resolve release tag
         id: tag
@@ -53,6 +62,6 @@ jobs:
           # Assets are often uploaded after the release is published, so on
           # release events wait for the asset list to settle before syncing.
           WAIT_FOR_ASSETS: ${{ github.event_name == 'release' && github.event.action == 'published' }}
-          # Prototype only: upload just the small refs zip to measure throughput.
-          ASSET_FILTER: ${{ github.event_name == 'push' && '^retooled-refs\.zip$' || '' }}
+          # Prototype only: upload a single large asset to measure throughput.
+          ASSET_FILTER: ${{ github.event_name == 'push' && '^retooled-linux\.rtpatch$' || '' }}
         run: .github/scripts/gitee-mirror.sh
