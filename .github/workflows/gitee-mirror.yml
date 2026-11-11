@@ -30,8 +30,6 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Resolve release tag
         id: tag
@@ -46,28 +44,6 @@ jobs:
           fi
           echo "Mirroring release $tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-      - name: Configure SSH for Gitee
-        env:
-          GITEE_PK: ${{ secrets.GITEEPK }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$GITEE_PK" > ~/.ssh/gitee
-          chmod 600 ~/.ssh/gitee
-          ssh-keyscan -t ed25519,rsa gitee.com >> ~/.ssh/known_hosts
-          cat >> ~/.ssh/config <<'EOF'
-          Host gitee.com
-            IdentityFile ~/.ssh/gitee
-            IdentitiesOnly yes
-          EOF
-
-      - name: Push branch and tag to Gitee
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          git remote add gitee "git@gitee.com:${GITEE_OWNER}/${GITEE_REPO}.git"
-          git push gitee "refs/remotes/origin/main:refs/heads/main"
-          git push --force gitee "refs/tags/${TAG}:refs/tags/${TAG}"
 
       - name: Mirror release and assets
         env:

@@ -39,6 +39,28 @@ if [ "${WAIT_FOR_ASSETS:-false}" = "true" ]; then
   done
 fi
 
+# --- Wait for Gitee's repository mirror to pick up the tag ----------------
+# The Gitee repo pulls git history from GitHub on its own; the release must
+# be attached to a tag that already exists there.
+for ((i = 0; ; i++)); do
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -G "$API/tags/$TAG" \
+    --data-urlencode "access_token=$GITEE_TOKEN")
+  # Fall back to scanning the tag list if the single-tag endpoint is missing.
+  if [ "$code" != 200 ]; then
+    curl -sS -G "$API/tags" --data-urlencode "access_token=$GITEE_TOKEN" \
+      --data-urlencode "per_page=100" --data-urlencode "sort=updated" \
+      --data-urlencode "direction=desc" \
+      | jq -e --arg t "$TAG" 'any(.[]; .name == $t)' >/dev/null && code=200
+  fi
+  [ "$code" = 200 ] && { echo "Tag $TAG present on Gitee"; break; }
+  if [ "$i" -ge 30 ]; then
+    echo "::error::Tag $TAG did not appear on Gitee after 30 minutes. Sync the Gitee repository mirror, then re-run this workflow."
+    exit 1
+  fi
+  echo "Waiting for tag $TAG to be mirrored to Gitee..."
+  sleep 60
+done
+
 release=$(gh_release)
 name=$(jq -r '.name // empty' <<<"$release")
 body=$(jq -r '.body // empty' <<<"$release")
