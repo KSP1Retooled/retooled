@@ -28,6 +28,9 @@ jobs:
   mirror:
     # Self-hosted: GitHub-hosted runners only reach Gitee at ~20 KB/s.
     runs-on: self-hosted
+    container:
+      image: ghcr.io/ksp1retooled/ksp-ci:1
+      options: --user 1003:1003
     defaults:
       run:
         shell: bash
