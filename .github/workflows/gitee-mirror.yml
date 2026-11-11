@@ -35,10 +35,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check runner environment
+      # The self-hosted runner doesn't ship gh/jq; fetch pinned static builds
+      # into the job's temp dir when missing (no root, nothing left behind).
+      - name: Install gh and jq if missing
         run: |
-          uname -a || true
-          for t in gh jq curl awk; do printf '%s: ' "$t"; command -v "$t" || echo MISSING; done
+          bin="$RUNNER_TEMP/bin"; mkdir -p "$bin"
+          if ! command -v jq >/dev/null; then
+            curl -fsSL -o "$bin/jq" https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
+            chmod +x "$bin/jq"
+          fi
+          if ! command -v gh >/dev/null; then
+            curl -fsSL https://github.com/cli/cli/releases/download/v2.63.2/gh_2.63.2_linux_amd64.tar.gz \
+              | tar -xz -C "$bin" --strip-components=2 gh_2.63.2_linux_amd64/bin/gh
+          fi
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/jq" --version 2>/dev/null || jq --version
+          "$bin/gh" --version 2>/dev/null | head -n1 || gh --version | head -n1
 
       - name: Resolve release tag
         id: tag
