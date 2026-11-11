@@ -27,7 +27,10 @@ env:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # Gitee accepts ~25 KB/s per upload from outside China; assets upload in
+    # parallel, so a release takes about as long as its largest asset (~3.5 h
+    # for ~300 MB). GitHub-hosted jobs are capped at 6 h.
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -53,8 +56,4 @@ jobs:
           # Assets are often uploaded after the release is published, so on
           # release events wait for the asset list to settle before syncing.
           WAIT_FOR_ASSETS: ${{ github.event_name == 'release' && github.event.action == 'published' }}
-          # Prototype only: upload three large assets in parallel for 3 minutes
-          # to measure whether throughput scales with concurrent connections.
-          ASSET_FILTER: ${{ github.event_name == 'push' && '^retooled-(linux|macos|windows)\.rtpatch$' || '' }}
-          UPLOAD_MAX_TIME: ${{ github.event_name == 'push' && '180' || '' }}
         run: .github/scripts/gitee-mirror.sh
