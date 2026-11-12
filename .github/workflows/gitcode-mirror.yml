@@ -1,0 +1,75 @@
+name: Mirror release to GitCode
+
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to mirror (defaults to the latest release)
+        required: false
+  # Prototype only: lets the workflow run from a non-default branch.
+  # Remove before merging to main.
+  push:
+    branches: [gitee-mirror]
+
+concurrency:
+  group: gitcode-mirror-${{ github.event.release.tag_name || inputs.tag || 'latest' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GITCODE_OWNER: ksp1retooled
+  GITCODE_REPO: retooled
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    # Assets upload in parallel straight to GitCode's object storage, so a
+    # release takes about as long as its largest asset. Keep the GitHub-hosted
+    # 6 h ceiling as headroom until real upload speeds are known.
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      # Uploads cross a long, lossy link to China. BBR keeps throughput up
+      # under packet loss where the default CUBIC collapses, and bigger send
+      # buffers let each connection keep more data in flight. Best effort:
+      # the mirror still runs if the runner refuses these settings.
+      - name: Tune TCP for long-distance uploads
+        continue-on-error: true
+        run: |
+          sudo modprobe tcp_bbr
+          sudo sysctl -w net.core.default_qdisc=fq \
+            net.ipv4.tcp_congestion_control=bbr \
+            net.core.wmem_max=67108864 \
+            net.ipv4.tcp_wmem="4096 65536 67108864" \
+            net.ipv4.tcp_slow_start_after_idle=0
+          sysctl net.ipv4.tcp_congestion_control
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${EVENT_TAG:-$INPUT_TAG}"
+          if [ -z "$tag" ]; then
+            tag=$(gh release list -R "$GITHUB_REPOSITORY" --limit 1 --json tagName -q '.[0].tagName')
+          fi
+          echo "Mirroring release $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Mirror release and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The GITEEPAT secret now holds the GitCode personal access token.
+          GITCODE_TOKEN: ${{ secrets.GITEEPAT }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          # Assets are often uploaded after the release is published, so on
+          # release events wait for the asset list to settle before syncing.
+          WAIT_FOR_ASSETS: ${{ github.event_name == 'release' && github.event.action == 'published' }}
+        run: .github/scripts/gitcode-mirror.sh
