@@ -33,6 +33,9 @@ jobs:
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the sync step pushes every branch and tag.
+          fetch-depth: 0
 
       # Uploads cross a long, lossy link to China. BBR keeps throughput up
       # under packet loss where the default CUBIC collapses, and bigger send
@@ -62,6 +65,16 @@ jobs:
           fi
           echo "Mirroring release $tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # Push branches and tags to GitCode over HTTPS, so the release's tag
+      # always exists there before the release is created. Runs after the
+      # TCP tuning step, so pushes use the tuned connection too.
+      - name: Sync repository to GitCode
+        env:
+          # The GITEEPAT secret now holds the GitCode personal access token.
+          GITCODE_TOKEN: ${{ secrets.GITEEPAT }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: .github/scripts/gitcode-sync.sh
 
       - name: Mirror release and assets
         env:

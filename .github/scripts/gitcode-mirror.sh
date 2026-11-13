@@ -127,10 +127,11 @@ if [ "${WAIT_FOR_ASSETS:-false}" = "true" ]; then
   done
 fi
 
-# --- Wait for GitCode's repository mirror to pick up the tag --------------
-# The GitCode repo pulls git history from GitHub on its own; the release must
-# be attached to a tag that already exists there. GitCode has no single-tag
-# endpoint and its tag list cannot be sorted, so page through all of it.
+# --- Wait for the tag to be visible through GitCode's API -----------------
+# The release must be attached to a tag that already exists on GitCode. The
+# workflow pushes it over HTTPS first (gitcode-sync.sh); this wait covers any
+# delay before the API lists it. GitCode has no single-tag endpoint and its
+# tag list cannot be sorted, so page through all of it.
 tag_on_gitcode() {
   local page out
   for ((page = 1; page <= 50; page++)); do
@@ -145,7 +146,7 @@ tag_on_gitcode() {
 for ((i = 0; ; i++)); do
   tag_on_gitcode && { echo "Tag $TAG present on GitCode"; break; }
   if [ "$i" -ge 30 ]; then
-    echo "::error::Tag $TAG did not appear on GitCode after 30 minutes. Sync the GitCode repository mirror, then re-run this workflow."
+    echo "::error::Tag $TAG did not appear on GitCode after 30 minutes. Check the 'Sync repository to GitCode' step, then re-run this workflow."
     exit 1
   fi
   echo "Waiting for tag $TAG to be mirrored to GitCode..."
