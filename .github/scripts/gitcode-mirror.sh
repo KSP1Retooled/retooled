@@ -11,6 +11,9 @@
 #     pre-signed object-storage URL plus headers; the file is PUT there with
 #     those headers unchanged, and storage calls GitCode back to attach it.
 #
+# GitCode silently stops attaching assets once a repository has more than 15
+# releases, so creating a new release first deletes the oldest one(s) there.
+#
 # Transient failures (network errors, timeouts, HTTP 408/429/5xx) are retried
 # with backoff: API calls up to API_ATTEMPTS times (~5 min), GitHub CLI calls
 # up to GH_ATTEMPTS times, and each asset upload up to UPLOAD_ATTEMPTS times.
@@ -20,6 +23,7 @@
 # Optional env: WAIT_FOR_ASSETS=true
 #               ASSET_FILTER=<regex>  only sync assets whose name matches
 #               UPLOAD_MAX_TIME=<s>   cap each upload (for throughput tests)
+#               GITCODE_MAX_RELEASES=<n>  release limit (default 15, 0 = off)
 #               API_ATTEMPTS, GH_ATTEMPTS, UPLOAD_ATTEMPTS  override retries
 set -euo pipefail
 
@@ -178,6 +182,89 @@ payload=$(jq -n --arg tag "$TAG" --arg name "$name" --arg body "$body" \
   '{tag_name: $tag, name: $name, body: $body}
    + (if $status == "" then {} else {release_status: $status} end)')
 
+# --- Make room under GitCode's release limit ------------------------------
+# GitCode stops attaching assets (silently) once a repository has more than
+# MAX_RELEASES releases, so before a new release is created the oldest ones
+# are deleted until the new one fits. Set GITCODE_MAX_RELEASES=0 to disable.
+MAX_RELEASES=${GITCODE_MAX_RELEASES:-15}
+
+# Print every GitCode release as one JSON array, or fail.
+gitcode_releases() {
+  local page out all='[]'
+  for ((page = 1; page <= 50; page++)); do
+    out=$(api GET /releases --url-query "per_page=100" --url-query "page=$page") || return 1
+    jq -e 'type == "array"' <<<"$out" >/dev/null 2>&1 || return 1
+    all=$(jq -c --argjson a "$all" '$a + . | unique_by(.tag_name)' <<<"$out")
+    if [ "$(jq length <<<"$out")" -lt 100 ]; then break; fi
+  done
+  printf '%s' "$all"
+}
+
+# True once the release list no longer contains tag $1.
+release_gone() {
+  local i rels
+  for ((i = 0; i < 3; i++)); do
+    if rels=$(gitcode_releases) \
+      && jq -e --arg t "$1" 'all(.[]; .tag_name != $t)' <<<"$rels" >/dev/null; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+# Delete the GitCode release for tag $1 and confirm that it is gone.
+delete_gitcode_release() {
+  local path
+  path=$(jq -rn --arg t "$1" '$t | @uri')
+  api DELETE "/releases/$path" >/dev/null || true
+  release_gone "$1" && return 0
+  # GitCode's API docs list no release-delete endpoint, so the call above may
+  # be refused. Deleting the tag (documented) takes its release with it; the
+  # tag itself comes back with the next repository sync, without a release.
+  echo "Release $1 is still listed; deleting its tag on GitCode instead"
+  api DELETE "/tags/$path" >/dev/null || true
+  release_gone "$1"
+}
+
+# Delete the oldest releases (by creation time on GitCode) until there is
+# room for one more. Never touches the release for $TAG.
+prune_gitcode_releases() {
+  local keep=$((MAX_RELEASES - 1)) rels count oldest
+  (( MAX_RELEASES > 0 )) || return 0
+  while :; do
+    if ! rels=$(gitcode_releases); then
+      echo "::warning::Could not list GitCode releases; old releases were not pruned"
+      return 1
+    fi
+    rels=$(jq -c --arg t "$TAG" '[.[] | select(.tag_name != $t)]' <<<"$rels")
+    count=$(jq length <<<"$rels")
+    echo "GitCode has $count other release(s); limit is $MAX_RELEASES"
+    (( count > keep )) || return 0
+    # created_at looks like 2025-01-16T19:58:07+08:00; compare as UTC seconds.
+    if ! oldest=$(jq -er '
+      def epoch:
+        (capture("^(?<d>[0-9-]+T[0-9:]+)(?:\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})?$")
+          // error("unparseable date")) as $m
+        | ($m.d + "Z" | fromdateiso8601)
+          - (if $m.z == null or $m.z == "" or $m.z == "Z" then 0
+             else (($m.z[1:3] | tonumber) * 3600 + ($m.z[-2:] | tonumber) * 60)
+                  * (if $m.z[0:1] == "-" then -1 else 1 end)
+             end);
+      map({tag_name, t: (.created_at | epoch)}) | sort_by(.t) | .[0].tag_name' \
+      <<<"$rels" 2>/dev/null); then
+      echo "::warning::Could not tell which GitCode release is oldest; old releases were not pruned"
+      return 1
+    fi
+    echo "Deleting oldest GitCode release $oldest to make room for $TAG"
+    if ! delete_gitcode_release "$oldest"; then
+      echo "::warning::Could not delete GitCode release $oldest; delete it on GitCode by hand"
+      return 1
+    fi
+    echo "Deleted GitCode release $oldest"
+  done
+}
+
 # --- Create or update the GitCode release ---------------------------------
 rc=0
 gitcode_release >/dev/null || rc=$?
@@ -192,6 +279,9 @@ case $rc in
     fi
     ;;
   3 | 4)
+    # Best effort: if pruning fails, still mirror; the asset checks below
+    # report an error if GitCode then refuses the uploads.
+    prune_gitcode_releases || true
     echo "Creating GitCode release for $TAG"
     if ! out=$(api POST /releases \
       -H 'Content-Type: application/json' \
