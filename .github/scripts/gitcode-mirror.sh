@@ -11,8 +11,9 @@
 #     pre-signed object-storage URL plus headers; the file is PUT there with
 #     those headers unchanged, and storage calls GitCode back to attach it.
 #
-# GitCode silently stops attaching assets once a repository has more than 15
-# releases, so creating a new release first deletes the oldest one(s) there.
+# GitCode silently stops attaching assets once a repository has too many
+# releases, so mirroring a release first deletes the oldest one(s) of the
+# same kind there: at most 15 prereleases and 4 full releases are kept.
 #
 # Transient failures (network errors, timeouts, HTTP 408/429/5xx) are retried
 # with backoff: API calls up to API_ATTEMPTS times (~5 min), GitHub CLI calls
@@ -23,7 +24,8 @@
 # Optional env: WAIT_FOR_ASSETS=true
 #               ASSET_FILTER=<regex>  only sync assets whose name matches
 #               UPLOAD_MAX_TIME=<s>   cap each upload (for throughput tests)
-#               GITCODE_MAX_RELEASES=<n>  release limit (default 15, 0 = off)
+#               GITCODE_MAX_PRERELEASES=<n>  prereleases kept (default 15, 0 = off)
+#               GITCODE_MAX_RELEASES=<n>     full releases kept (default 4, 0 = off)
 #               API_ATTEMPTS, GH_ATTEMPTS, UPLOAD_ATTEMPTS  override retries
 set -euo pipefail
 
@@ -184,9 +186,11 @@ payload=$(jq -n --arg tag "$TAG" --arg name "$name" --arg body "$body" \
 
 # --- Make room under GitCode's release limit ------------------------------
 # GitCode stops attaching assets (silently) once a repository has more than
-# MAX_RELEASES releases, so before a new release is created the oldest ones
-# are deleted until the new one fits. Set GITCODE_MAX_RELEASES=0 to disable.
-MAX_RELEASES=${GITCODE_MAX_RELEASES:-15}
+# too many releases, so prereleases and full releases are each kept under
+# their own limit: before a release is mirrored, the oldest ones of the same
+# kind are deleted until it fits. Setting a limit to 0 disables it.
+MAX_PRERELEASES=${GITCODE_MAX_PRERELEASES:-15}
+MAX_RELEASES=${GITCODE_MAX_RELEASES:-4}
 
 # Print every GitCode release as one JSON array, or fail.
 gitcode_releases() {
@@ -227,19 +231,28 @@ delete_gitcode_release() {
   release_gone "$1"
 }
 
-# Delete the oldest releases (by creation time on GitCode) until there is
-# room for one more. Never touches the release for $TAG.
+# Delete the oldest releases of $TAG's kind (prerelease or full release, by
+# creation time on GitCode) until there is room for one more of that kind.
+# Never touches the release for $TAG or releases of the other kind.
 prune_gitcode_releases() {
-  local keep=$((MAX_RELEASES - 1)) rels count oldest
-  (( MAX_RELEASES > 0 )) || return 0
+  local kind=release limit=$MAX_RELEASES keep rels count oldest
+  if [ "$prerelease" = "true" ]; then
+    kind=prerelease limit=$MAX_PRERELEASES
+  fi
+  (( limit > 0 )) || return 0
+  keep=$((limit - 1))
   while :; do
     if ! rels=$(gitcode_releases); then
       echo "::warning::Could not list GitCode releases; old releases were not pruned"
       return 1
     fi
-    rels=$(jq -c --arg t "$TAG" '[.[] | select(.tag_name != $t)]' <<<"$rels")
+    # Only count releases of the same kind as $TAG, other than $TAG itself.
+    rels=$(jq -c --arg t "$TAG" --arg k "$kind" '
+      [.[] | select(.tag_name != $t)
+           | select((if .prerelease == true or .release_status == "pre"
+                     then "prerelease" else "release" end) == $k)]' <<<"$rels")
     count=$(jq length <<<"$rels")
-    echo "GitCode has $count other release(s); limit is $MAX_RELEASES"
+    echo "GitCode has $count other ${kind}(s); limit is $limit"
     (( count > keep )) || return 0
     # created_at looks like 2025-01-16T19:58:07+08:00; compare as UTC seconds.
     if ! oldest=$(jq -er '
@@ -256,7 +269,7 @@ prune_gitcode_releases() {
       echo "::warning::Could not tell which GitCode release is oldest; old releases were not pruned"
       return 1
     fi
-    echo "Deleting oldest GitCode release $oldest to make room for $TAG"
+    echo "Deleting oldest GitCode $kind $oldest to make room for $TAG"
     if ! delete_gitcode_release "$oldest"; then
       echo "::warning::Could not delete GitCode release $oldest; delete it on GitCode by hand"
       return 1
@@ -270,6 +283,9 @@ rc=0
 gitcode_release >/dev/null || rc=$?
 case $rc in
   0)
+    # Normally a no-op here; matters when the release changed kind (a
+    # prerelease promoted to a full release, or the reverse).
+    prune_gitcode_releases || true
     echo "Updating existing GitCode release $TAG"
     if ! out=$(api PATCH "/releases/$TAG_PATH" \
       -H 'Content-Type: application/json' \
